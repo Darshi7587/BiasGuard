@@ -1,0 +1,5 @@
+export { default as HomePage } from './HomePage.jsx'
+export { default as UploadPage } from './UploadPage.jsx'
+export { default as ConfigurationPage } from './ConfigurationPage.jsx'
+export { default as DashboardPage } from './DashboardPage.jsx'
+export { default as DatasetsDashboardPage } from './DatasetsDashboardPage.jsx'
