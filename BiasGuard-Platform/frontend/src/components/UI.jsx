@@ -63,7 +63,8 @@ export function RiskIndicator({ level = 'LOW' }) {
     },
   }
 
-  const cfg = config[level]
+  const normalizedLevel = (level || 'LOW').toUpperCase()
+  const cfg = config[normalizedLevel] || config.LOW
   const Icon = cfg.icon
 
   return (

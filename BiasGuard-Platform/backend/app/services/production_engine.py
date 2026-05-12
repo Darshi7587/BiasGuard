@@ -16,7 +16,42 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.tree import DecisionTreeClassifier
 
+from .insight_generator import InsightGenerator
+
 logger = logging.getLogger(__name__)
+
+
+def fairness_decision_engine(accuracy: float, bias_score: float, dataset_size: int):
+    """Deterministic fairness decision engine for backend integration."""
+    if bias_score < 0.05:
+        bias_level = 'Low'
+    elif bias_score <= 0.20:
+        bias_level = 'Medium'
+    else:
+        bias_level = 'High'
+
+    if accuracy < 0.50:
+        model_reliability = 'Low'
+    elif accuracy <= 0.75:
+        model_reliability = 'Medium'
+    else:
+        model_reliability = 'High'
+
+    mitigation = 'Yes' if bias_score > 0.20 else 'No'
+
+    if dataset_size < 500:
+        confidence = 'Low'
+    elif dataset_size <= 2000:
+        confidence = 'Medium'
+    else:
+        confidence = 'High'
+
+    return {
+        'bias_level': bias_level,
+        'model_reliability': model_reliability,
+        'mitigation': mitigation,
+        'confidence': confidence,
+    }
 
 
 def _make_one_hot_encoder():
@@ -56,6 +91,7 @@ class ProductionBiasEngine:
         self.dataset_df = dataset_df.copy()
         self.target_col = target_col
         self.sensitive_attrs = [attr for attr in (sensitive_attrs or []) if attr in self.dataset_df.columns]
+        self.insight_generator = InsightGenerator()
 
     def _is_continuous_column(self, series: pd.Series):
         if not pd.api.types.is_numeric_dtype(series):
@@ -145,7 +181,7 @@ class ProductionBiasEngine:
     def _build_model(self, model_name: str):
         if model_name == 'decision_tree':
             return DecisionTreeClassifier(max_depth=8, random_state=42, class_weight='balanced')
-        return LogisticRegression(solver='saga', max_iter=500, random_state=42, class_weight='balanced', n_jobs=-1)
+        return LogisticRegression(solver='saga', max_iter=1000, random_state=42, class_weight='balanced')
 
     def _build_pipeline(self, model_name: str, X: pd.DataFrame) -> Pipeline:
         preprocessor, _, _ = self._build_preprocessor(X)
@@ -312,18 +348,74 @@ class ProductionBiasEngine:
             }
         best_model_name = self._best_model_name({name: info['metrics'] for name, info in model_results.items()})
         best_entry = model_results[best_model_name]
+        best_metrics = best_entry['metrics']
+        accuracy = best_metrics.get('accuracy', 0.0)
+        
+        # Calculate bias metrics
         bias_report = self.calculate_bias_metrics(split.test_frame, np.asarray(best_entry['scores']))
         overall_bias = max((metric['bias_score'] for metric in bias_report.values()), default=0.0)
-        risk_level = self._risk_from_bias(overall_bias)
+        
+        # Extract group-level metrics for fairness engine
+        group_metrics = {}
+        sample_sizes = {}
+        for attr, metrics_dict in bias_report.items():
+            group_data = metrics_dict.get('group_metrics', {})
+            for group_name, group_info in group_data.items():
+                key = f"{attr}_{group_name}"
+                group_metrics[key] = {
+                    'bias': group_info.get('mean_prediction_rate', 0.0),
+                    'count': group_info.get('count', 0)
+                }
+                sample_sizes[key] = group_info.get('count', 0)
+        
+        # Execute deterministic fairness decision engine
+        decision = fairness_decision_engine(
+            accuracy=accuracy,
+            bias_score=overall_bias,
+            dataset_size=len(prepared),
+        )
+
+        # Generate context-aware insights
+        insights_list = self.insight_generator.generate_insights(
+            accuracy=accuracy,
+            bias_score=overall_bias,
+            precision=best_metrics.get('precision', 0.0),
+            recall=best_metrics.get('recall', 0.0),
+            group_metrics=group_metrics,
+            model_reliability=decision['model_reliability'],
+            should_mitigate=(decision['mitigation'] == 'Yes'),
+            sample_sizes=sample_sizes if sample_sizes else None
+        )
+
+        print('Bias:', overall_bias)
+        print('Accuracy:', accuracy)
+        print('Decision:', decision)
+
         return {
             'dataset_name': self.dataset_name,
             'selected_model': best_model_name,
             'model_performance': {name: info['metrics'] for name, info in model_results.items()},
+            'metrics': best_metrics,
             'feature_importance': best_entry['feature_importance'],
             'bias_by_feature': bias_report,
+            'bias_analysis': bias_report,
             'bias_score': _safe_float(overall_bias),
-            'risk_level': risk_level,
-            'insights': self.generate_insights(bias_report),
+            'risk_level': 'High' if overall_bias > 0.20 or accuracy < 0.50 else 'Medium' if overall_bias > 0.05 or accuracy <= 0.75 else 'Low',
+            'decision': decision,
+            'should_mitigate': decision['mitigation'] == 'Yes',
+            'warning_flags': [],
+            'fairness_reasoning': 'Yes' if decision['mitigation'] == 'Yes' else 'No',
+            'insights': [
+                {
+                    'title': insight.title,
+                    'description': insight.description,
+                    'severity': insight.severity,
+                    'category': insight.category,
+                    'metrics_evidence': insight.metrics_evidence,
+                    'action': insight.action
+                }
+                for insight in insights_list
+            ],
             'mitigation_suggestions': self.generate_next_steps(bias_report),
         }
 

@@ -6,6 +6,109 @@ import { Card, Button, LoadingSpinner, DatasetCard } from '../components'
 import { listDatasets } from '../utils/api'
 import { RefreshCw, Layers, BarChart3, Sparkles, Plus, TrendingUp, Activity, Database } from 'lucide-react'
 
+/**
+ * Status Aggregation System
+ * 
+ * Provides robust deduplication, normalization, and counting of datasets.
+ * Handles edge cases: null values, mixed case, duplicates, missing fields.
+ */
+
+/**
+ * Normalize status string to canonical form.
+ * Examples: 'ready' -> 'Ready', 'PENDING' -> 'Pending', null -> 'Not Started'
+ */
+const normalizeStatus = (status) => {
+  if (!status || typeof status !== 'string') {
+    return 'Not Started'
+  }
+  const trimmed = status.trim().toLowerCase()
+  const statusMap = {
+    'ready': 'Ready',
+    'analyzed': 'Ready',
+    'complete': 'Ready',
+    'done': 'Ready',
+    'not_started': 'Not Started',
+    'notstarted': 'Not Started',
+    'pending': 'Pending',
+    'waiting': 'Pending',
+    'queued': 'Pending',
+    'processing': 'Processing',
+    'analyzing': 'Processing',
+    'running': 'Processing',
+    'in progress': 'Processing',
+    'inprogress': 'Processing',
+  }
+  return statusMap[trimmed] || 'Not Started'
+}
+
+/**
+ * Deduplicate datasets by dataset_id, removing exact duplicates.
+ * Maintains insertion order (uploaded datasets override folder datasets).
+ */
+const deduplicateDatasets = (datasets) => {
+  if (!Array.isArray(datasets)) {
+    return []
+  }
+  
+  const seen = new Set()
+  return datasets.filter((dataset) => {
+    const id = dataset?.dataset_id
+    if (!id || seen.has(id)) {
+      return false
+    }
+    seen.add(id)
+    return true
+  })
+}
+
+/**
+ * Calculate accurate status counts from deduplicated dataset list.
+ * Returns: { total, ready, pending, processing, notStarted }
+ */
+const calculateStatusCounts = (datasets) => {
+  const deduplicated = deduplicateDatasets(datasets)
+  
+  const counts = {
+    total: deduplicated.length,
+    ready: 0,
+    pending: 0,
+    processing: 0,
+    notStarted: 0,
+  }
+  
+  deduplicated.forEach((dataset) => {
+    const normalizedStatus = normalizeStatus(dataset?.status)
+    switch (normalizedStatus) {
+      case 'Ready':
+        counts.ready++
+        break
+      case 'Pending':
+        counts.pending++
+        break
+      case 'Processing':
+        counts.processing++
+        break
+      case 'Not Started':
+        counts.notStarted++
+        break
+      default:
+        counts.notStarted++
+    }
+  })
+  
+  return counts
+}
+
+/**
+ * Enhance datasets with normalized status for UI display.
+ */
+const enrichDatasets = (datasets) => {
+  return deduplicateDatasets(datasets).map((dataset) => ({
+    ...dataset,
+    normalizedStatus: normalizeStatus(dataset?.status),
+  }))
+}
+
 export default function DatasetsDashboardPage() {
   const navigate = useNavigate()
   const [datasets, setDatasets] = useState([])
@@ -34,12 +137,6 @@ export default function DatasetsDashboardPage() {
     await loadDatasets()
   }
 
-  const getDatasetStatus = (dataset) => {
-    if (dataset?.error) return 'Error'
-    if (dataset?.analyzed) return 'Ready'
-    return 'Ready'
-  }
-
   const openConfigure = (dataset) => {
     navigate('/configure', { state: { dataset } })
   }
@@ -48,9 +145,9 @@ export default function DatasetsDashboardPage() {
     navigate('/dashboard', { state: { datasetId: dataset.dataset_id } })
   }
 
-  const readyCount = datasets.filter((dataset) => dataset.analyzed).length
-  const pendingCount = datasets.filter((dataset) => !dataset.analyzed).length
-  const processingCount = datasets.filter((dataset) => dataset.processing || dataset.training).length
+  // Calculate accurate status counts using the aggregation system
+  const statusCounts = calculateStatusCounts(datasets)
+  const enrichedDatasets = enrichDatasets(datasets)
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 text-slate-100">
@@ -119,7 +216,8 @@ export default function DatasetsDashboardPage() {
                 <TrendingUp className="h-5 w-5 text-indigo-300" />
               </div>
               <p className="mt-4 text-sm font-medium uppercase tracking-wider text-slate-400">Total Datasets</p>
-              <p className="mt-2 text-3xl font-bold text-white">{datasets.length}</p>
+              <p className="mt-2 text-3xl font-bold text-white">{statusCounts.total}</p>
+              <p className="mt-1 text-xs text-slate-500">{statusCounts.total === 1 ? 'dataset' : 'datasets'} (deduplicated)</p>
             </div>
           </Card>
 
@@ -133,7 +231,8 @@ export default function DatasetsDashboardPage() {
                 <TrendingUp className="h-5 w-5 text-emerald-300" />
               </div>
               <p className="mt-4 text-sm font-medium uppercase tracking-wider text-slate-400">Ready</p>
-              <p className="mt-2 text-3xl font-bold text-emerald-300">{readyCount}</p>
+              <p className="mt-2 text-3xl font-bold text-emerald-300">{statusCounts.ready}</p>
+              <p className="mt-1 text-xs text-slate-500">analyzed & indexed</p>
             </div>
           </Card>
 
@@ -147,7 +246,8 @@ export default function DatasetsDashboardPage() {
                 <TrendingUp className="h-5 w-5 text-amber-300" />
               </div>
               <p className="mt-4 text-sm font-medium uppercase tracking-wider text-slate-400">Pending</p>
-              <p className="mt-2 text-3xl font-bold text-amber-300">{pendingCount}</p>
+              <p className="mt-2 text-3xl font-bold text-amber-300">{statusCounts.pending}</p>
+              <p className="mt-1 text-xs text-slate-500">awaiting analysis</p>
             </div>
           </Card>
 
@@ -161,7 +261,8 @@ export default function DatasetsDashboardPage() {
                 <TrendingUp className="h-5 w-5 text-slate-300" />
               </div>
               <p className="mt-4 text-sm font-medium uppercase tracking-wider text-slate-400">Processing</p>
-              <p className="mt-2 text-3xl font-bold text-slate-300">{processingCount}</p>
+              <p className="mt-2 text-3xl font-bold text-slate-300">{statusCounts.processing}</p>
+              <p className="mt-1 text-xs text-slate-500">in progress</p>
             </div>
           </Card>
         </motion.div>
@@ -230,7 +331,7 @@ export default function DatasetsDashboardPage() {
             transition={{ duration: 0.5, delay: 0.3 }}
             className="grid gap-6 [grid-template-columns:repeat(auto-fit,minmax(380px,1fr))]"
           >
-            {datasets.map((dataset, index) => (
+            {enrichedDatasets.map((dataset, index) => (
               <motion.div
                 key={dataset.dataset_id}
                 initial={{ opacity: 0, y: 20 }}
@@ -242,7 +343,7 @@ export default function DatasetsDashboardPage() {
                   rows={dataset.rows}
                   columns={dataset.columns}
                   target={dataset.target}
-                  status={getDatasetStatus(dataset)}
+                  status={dataset.normalizedStatus}
                   description={dataset.description}
                   source={dataset.source}
                   onAnalyze={() => openConfigure(dataset)}
